@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	h264FrameDuration = time.Millisecond * 33
+	h264FrameDuration = time.Millisecond / 60 * 1000
 )
 
 func main() { //nolint
@@ -64,6 +64,7 @@ func main() { //nolint
 	}()
 
 	go func() {
+		fmt.Printf("Running ffmpeg with args: %v\n", os.Args[1:])
 		dataPipe, err := RunCommand("ffmpeg", os.Args[1:]...)
 
 		if err != nil {
@@ -78,15 +79,9 @@ func main() { //nolint
 		// Wait for connection established
 		<-iceConnectedCtx.Done()
 
-		// Send our video file frame at a time. Pace our sending so we send it at the same speed it should be played back as.
-		// This isn't required since the video is timestamped, but we will such much higher loss if we send all at once.
-		//
-		// It is important to use a time.Ticker instead of time.Sleep because
-		// * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
-		// * works around latency issues with Sleep (see https://github.com/golang/go/issues/44343)
 		spsAndPpsCache := []byte{}
-		ticker := time.NewTicker(h264FrameDuration)
-		for ; true; <-ticker.C {
+
+		for {
 			nal, h264Err := h264.NextNAL()
 			if h264Err == io.EOF {
 				fmt.Printf("All video frames parsed and sent")
@@ -98,6 +93,7 @@ func main() { //nolint
 
 			nal.Data = append([]byte{0x00, 0x00, 0x00, 0x01}, nal.Data...)
 
+			// fmt.Printf("NAL Unit type: %s\n", nal.UnitType.String())
 			if nal.UnitType == h264reader.NalUnitTypeSPS || nal.UnitType == h264reader.NalUnitTypePPS {
 				spsAndPpsCache = append(spsAndPpsCache, nal.Data...)
 				continue
@@ -106,10 +102,45 @@ func main() { //nolint
 				spsAndPpsCache = []byte{}
 			}
 
-			if h264Err = videoTrack.WriteSample(media.Sample{Data: nal.Data, Duration: time.Second}); h264Err != nil {
+			if h264Err = videoTrack.WriteSample(media.Sample{Data: nal.Data, Duration: h264FrameDuration}); h264Err != nil {
 				panic(h264Err)
 			}
 		}
+
+		// FIXME: this didn't work great
+		// // Send our video file frame at a time. Pace our sending so we send it at the same speed it should be played back as.
+		// // This isn't required since the video is timestamped, but we will such much higher loss if we send all at once.
+		// //
+		// // It is important to use a time.Ticker instead of time.Sleep because
+		// // * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
+		// // * works around latency issues with Sleep (see https://github.com/golang/go/issues/44343)
+		// spsAndPpsCache := []byte{}
+		// ticker := time.NewTicker(h264FrameDuration)
+		// for ; true; <-ticker.C {
+		// 	nal, h264Err := h264.NextNAL()
+		// 	if h264Err == io.EOF {
+		// 		fmt.Printf("All video frames parsed and sent")
+		// 		os.Exit(0)
+		// 	}
+		// 	if h264Err != nil {
+		// 		panic(h264Err)
+		// 	}
+
+		// 	nal.Data = append([]byte{0x00, 0x00, 0x00, 0x01}, nal.Data...)
+
+		// 	fmt.Printf("NAL Unit type: %s\n", nal.UnitType.String())
+		// 	if nal.UnitType == h264reader.NalUnitTypeSPS || nal.UnitType == h264reader.NalUnitTypePPS {
+		// 		spsAndPpsCache = append(spsAndPpsCache, nal.Data...)
+		// 		continue
+		// 	} else if nal.UnitType == h264reader.NalUnitTypeCodedSliceIdr {
+		// 		nal.Data = append(spsAndPpsCache, nal.Data...)
+		// 		spsAndPpsCache = []byte{}
+		// 	}
+
+		// 	if h264Err = videoTrack.WriteSample(media.Sample{Data: nal.Data, Duration: time.Second}); h264Err != nil {
+		// 		panic(h264Err)
+		// 	}
+		// }
 	}()
 
 	// Set the handler for ICE connection state
